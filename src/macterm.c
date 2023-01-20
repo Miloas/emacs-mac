@@ -1,6 +1,6 @@
 /* Implementation of GUI terminal on macOS.
    Copyright (C) 2000-2008  Free Software Foundation, Inc.
-   Copyright (C) 2009-2022  YAMAMOTO Mitsuharu
+   Copyright (C) 2009-2023  YAMAMOTO Mitsuharu
 
 This file is part of GNU Emacs Mac port.
 
@@ -4905,7 +4905,7 @@ mac_cgevent_to_input_event (CGEventRef cgevent, struct input_event *buf)
   return mapped_flags;
 }
 
-void
+static void
 mac_get_selected_range (struct window *w, CFRange *range)
 {
   struct buffer *b = XBUFFER (w->contents);
@@ -5879,26 +5879,19 @@ syms_of_macterm (void)
      from cus-start.el and other places, like "M-x set-variable".  */
   DEFVAR_BOOL ("x-use-underline-position-properties",
 	       x_use_underline_position_properties,
-     doc: /* Non-nil means make use of UNDERLINE_POSITION font properties.
-A value of nil means ignore them.  If you encounter fonts with bogus
-UNDERLINE_POSITION font properties, set this to nil.  You can also use
-`underline-minimum-offset' to override the font's UNDERLINE_POSITION for
-small font display sizes.  */);
+	       doc: /* SKIP: real doc in xterm.c.  */);
   x_use_underline_position_properties = true;
   DEFSYM (Qx_use_underline_position_properties,
 	  "x-use-underline-position-properties");
 
   DEFVAR_BOOL ("x-underline-at-descent-line",
 	       x_underline_at_descent_line,
-     doc: /* Non-nil means to draw the underline at the same place as the descent line.
-A value of nil means to draw the underline according to the value of the
-variable `x-use-underline-position-properties', which is usually at the
-baseline level.  The default value is nil.  */);
+	       doc: /* SKIP: real doc in xterm.c.  */);
   x_underline_at_descent_line = false;
   DEFSYM (Qx_underline_at_descent_line, "x-underline-at-descent-line");
 
   DEFVAR_LISP ("x-toolkit-scroll-bars", Vx_toolkit_scroll_bars,
-    doc: /* If not nil, Emacs uses toolkit scroll bars.  */);
+	       doc: /* SKIP: real doc in xterm.c.  */);
   Vx_toolkit_scroll_bars = Qt;
 
   DEFVAR_BOOL ("mac-redisplay-dont-reset-vscroll", mac_redisplay_dont_reset_vscroll,

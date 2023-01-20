@@ -1,5 +1,5 @@
 /* Functions for GUI implemented with Cocoa AppKit on macOS.
-   Copyright (C) 2008-2022  YAMAMOTO Mitsuharu
+   Copyright (C) 2008-2023  YAMAMOTO Mitsuharu
 
 This file is part of GNU Emacs Mac port.
 
@@ -2787,7 +2787,7 @@ static void mac_move_frame_window_structure_1 (struct frame *, int, int);
 					    & WM_STATE_SKIP_TASKBAR) != 0)];
 }
 
-- (void)updateWindowLevel;
+- (void)updateWindowLevel
 {
   NSWindowLevel level = NSNormalWindowLevel;
 
@@ -3216,9 +3216,14 @@ static void mac_move_frame_window_structure_1 (struct frame *, int, int);
 
   if (windowManagerState & WM_STATE_FULLSCREEN)
     {
-      NSRect screenFrame = [[window screen] frame];
+      NSScreen *screen = window.screen;
 
-      result = screenFrame.size;
+      /* On macOS 12, window.screen might become nil when waking up
+	 from sleep and window was on a non-primary screen.  */
+      if (screen)
+	result = screen.frame.size;
+      else
+	result = proposedFrameSize;
     }
   else
     {
@@ -8217,9 +8222,8 @@ static BOOL NonmodalScrollerPagingBehavior;
     {
       NSPoint point = [self convertPoint:[theEvent locationInWindow]
 			    fromView:nil];
-      NSRect bounds, knobRect;
+      NSRect knobRect;
 
-      bounds = [self bounds];
       knobRect = [self rectForPart:NSScrollerKnob];
 
       if (jumpsToClickedSpot)
@@ -8299,12 +8303,11 @@ static BOOL NonmodalScrollerPagingBehavior;
     {
       NSPoint point = [self convertPoint:[theEvent locationInWindow]
 			    fromView:nil];
-      NSRect bounds, knobSlotRect;
+      NSRect knobSlotRect;
 
       if (knobGrabOffset <= -1)
 	knobGrabOffset = - (knobGrabOffset + 1);
 
-      bounds = [self bounds];
       knobSlotRect = [self rectForPart:NSScrollerKnobSlot];
       if (!isHorizontal)
 	knobMinEdgeInSlot = point.y - knobGrabOffset - NSMinY (knobSlotRect);
@@ -8348,6 +8351,8 @@ static BOOL NonmodalScrollerPagingBehavior;
 	      if (part != NSScrollerIncrementPage
 		  && part != NSScrollerDecrementPage)
 		unhilite = YES;
+	      break;
+	    default:
 	      break;
 	    }
 	}
@@ -8529,9 +8534,8 @@ static BOOL NonmodalScrollerPagingBehavior;
       BOOL enabled = [self isEnabled];
       double floatValue = [self doubleValue];
       CGFloat knobProportion = [self knobProportion];
-      NSRect bounds, knobSlotRect;
+      NSRect knobSlotRect;
 
-      bounds = [self bounds];
       [self setDoubleValue:0];
       [self setKnobProportion:0];
       [self setEnabled:YES];
@@ -8670,9 +8674,8 @@ scroller_part_to_scroll_bar_part (NSScrollerPart part,
     case NSScrollerIncrementPage:	return scroll_bar_below_handle;
     case NSScrollerKnob:		return scroll_bar_handle;
     case NSScrollerNoPart:		return scroll_bar_end_scroll;
+    default:				return -1;
     }
-
-  return -1;
 }
 
 static int
@@ -8685,9 +8688,8 @@ scroller_part_to_horizontal_scroll_bar_part (NSScrollerPart part,
     case NSScrollerIncrementPage:	return scroll_bar_after_handle;
     case NSScrollerKnob:		return scroll_bar_horizontal_handle;
     case NSScrollerNoPart:		return scroll_bar_end_scroll;
+    default:				return -1;
     }
-
-  return -1;
 }
 
 /* Generate an Emacs input event in response to a scroller action sent
@@ -11081,7 +11083,8 @@ init_menu_bar (void)
 	     action:@selector(about:)
 	     keyEquivalent:@""];
   [appleMenu addItem:[NSMenuItem separatorItem]];
-  [appleMenu addItemWithTitle:@"Preferences..."
+  [appleMenu addItemWithTitle:(mac_operating_system_version.major >= 13
+			       ? @"Settings..." : @"Preferences...")
 	     action:@selector(preferences:) keyEquivalent:@""];
   [appleMenu addItem:[NSMenuItem separatorItem]];
   [appleMenu setSubmenu:servicesMenu
@@ -11838,7 +11841,7 @@ mac_export_frames (Lisp_Object frames, Lisp_Object type)
   struct frame *f;
   NSWindow *window;
   NSView *contentView;
-  int count = SPECPDL_INDEX ();
+  ptrdiff_t count = SPECPDL_INDEX ();
 
   specbind (Qredisplay_dont_pause, Qt);
   redisplay_preserve_echo_area (31);
@@ -13566,6 +13569,20 @@ static WKWebView *EmacsSVGDocumentLastWebView;
 static WebView *EmacsSVGDocumentLastWebView;
 #endif
 
+#ifdef USE_WK_API
+- (void)setFinishNavigationHandler:(void (^) (WKWebView *, WKNavigation *))block
+{
+  MRC_RELEASE (finishNavigationHandler);
+  finishNavigationHandler = [block copy];
+}
+#else
+- (void)setFinishLoadForFrameHandler:(void (^) (WebView *, WebFrame *))block
+{
+  MRC_RELEASE (finishLoadForFrameHandler);
+  finishLoadForFrameHandler = [block copy];
+}
+#endif
+
 - (instancetype)initWithURL:(NSURL *)url
 		    options:(NSDictionaryOf (NSString *, id) *)options
 {
@@ -13682,7 +13699,12 @@ static WebView *EmacsSVGDocumentLastWebView;
     }
 
   NSURL *baseURL = options[@"baseURL"];
+  BOOL __block finished = NO;
+  enum {SVG_LENGTHTYPE_PERCENTAGE = 2};
+  NSString *styleSheet = options[@"styleSheet"];
 #ifdef USE_WK_API
+  id boundingBox, widthBaseVal, heightBaseVal;
+  NSString * __block jsonString = nil;
   if (baseURL)
     {
       NSURLComponents *components =
@@ -13691,41 +13713,19 @@ static WebView *EmacsSVGDocumentLastWebView;
       baseURL = components.URL;
     }
   webView.navigationDelegate = self;
-  [webView loadData:data MIMEType:@"image/svg+xml"
-	   characterEncodingName:@"UTF-8" baseURL:baseURL];
-#else  /* !USE_WK_API */
-  webView.frameLoadDelegate = self;
-  webView.mainFrame.frameView.allowsScrolling = NO;
-  [webView.mainFrame loadData:data MIMEType:@"image/svg+xml"
-	     textEncodingName:nil baseURL:baseURL];
-#endif  /* !USE_WK_API */
-
-  /* webView.isLoading is not sufficient if we have <image
-     xlink:href=... /> */
-  while (!isLoaded)
-    mac_run_loop_run_once (0);
-
-  int width = -1, height;
-  @try
-    {
-      id boundingBox, widthBaseVal, heightBaseVal;
-      enum {SVG_LENGTHTYPE_PERCENTAGE = 2};
-      NSString *styleSheet = options[@"styleSheet"];
-#ifdef USE_WK_API
-      NSString * __block jsonString;
-      BOOL __block finished = NO;
-      /* Characters unescaped with encodeURIComponent.  */
-      static NSCharacterSet *allowedCharacters;
-      if (allowedCharacters == nil)
-	allowedCharacters = MRC_RETAIN ([NSCharacterSet
-					  characterSetWithCharactersInString:@""
-					  "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-					  "abcdefghijklmnopqrstuvwxyz"
-					  "0123456789" "-_.!~*'()"]);
-      NSString *encodedStyleSheet =
-	[styleSheet
-	  stringByAddingPercentEncodingWithAllowedCharacters:allowedCharacters];
-      NSString *script = [NSString stringWithFormat:@""
+  self.finishNavigationHandler = ^(WKWebView *view, WKNavigation *navigation) {
+    /* Characters unescaped with encodeURIComponent.  */
+    static NSCharacterSet *allowedCharacters;
+    if (allowedCharacters == nil)
+      allowedCharacters = MRC_RETAIN ([NSCharacterSet
+					characterSetWithCharactersInString:@""
+					"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+					"abcdefghijklmnopqrstuvwxyz"
+					"0123456789" "-_.!~*'()"]);
+    NSString *encodedStyleSheet =
+    [styleSheet
+      stringByAddingPercentEncodingWithAllowedCharacters:allowedCharacters];
+    NSString *script = [NSString stringWithFormat:@""
 "var documentElement = document.documentElement;\n"
 "const styleElement = document.createElementNS ('http://www.w3.org/2000/svg', 'style');\n"
 "styleElement.textContent = decodeURIComponent (\"%@\");\n"
@@ -13744,68 +13744,101 @@ static WebView *EmacsSVGDocumentLastWebView;
 "	 && documentElement.height.baseVal.unitType != SVGLength.SVG_LENGTHTYPE_PERCENTAGE)\n"
 "	? null : filter (documentElement.getBBox (),\n"
 "			 ['x', 'y', 'width', 'height']))}))",
-				   encodedStyleSheet ? encodedStyleSheet : @""];
-      [webView evaluateJavaScript:script
-		completionHandler:^(id scriptResult, NSError *error) {
-	  if ([scriptResult isKindOfClass:NSString.class])
-	    jsonString = MRC_RETAIN (scriptResult);
-	  else
-	    jsonString = nil;
-	  finished = YES;
-	}];
-
-      while (!finished)
-	mac_run_loop_run_once (0);
-
-      if (jsonString == nil)
-	widthBaseVal = nil;
-      else
-	{
-	  NSData *data =
-	    [jsonString dataUsingEncoding:NSUTF8StringEncoding];
-	  NSDictionary *jsonObject =
-	    [NSJSONSerialization JSONObjectWithData:data options:0
-					      error:NULL];
-
-	  boundingBox = jsonObject[@"boundingBox"];
-	  widthBaseVal = jsonObject[@"widthBaseVal"];
-	  heightBaseVal = jsonObject[@"heightBaseVal"];
-	  MRC_AUTORELEASE (jsonString);
-	}
+				 encodedStyleSheet ? encodedStyleSheet : @""];
+    [view evaluateJavaScript:script
+	   completionHandler:^(id scriptResult, NSError *error) {
+	if ([scriptResult isKindOfClass:NSString.class])
+	  jsonString = MRC_RETAIN (scriptResult);
+	else
+	  jsonString = nil;
+	finished = YES;
+      }];
+  };
+  [webView loadData:data MIMEType:@"image/svg+xml"
+	   characterEncodingName:@"UTF-8" baseURL:baseURL];
 #else  /* !USE_WK_API */
-      DOMDocument *document =
+  id __block boundingBox = nil, widthBaseVal = nil, heightBaseVal = nil;
+  webView.frameLoadDelegate = self;
+  webView.mainFrame.frameView.allowsScrolling = NO;
+  self.finishLoadForFrameHandler = ^(WebView *view, WebFrame *frame) {
+    @try
+      {
+	DOMDocument *document =
 	[webView.windowScriptObject valueForKey:@"document"];
-      DOMElement *documentElement = document.documentElement;
-      if (styleSheet)
-	{
-	  DOMElement *styleElement =
-	    [document createElementNS:@"http://www.w3.org/2000/svg"
-			qualifiedName:@"style"];
-	  styleElement.textContent = styleSheet;
-	  [documentElement appendChild:styleElement];
-	}
+	DOMElement *documentElement = document.documentElement;
+	if (styleSheet)
+	  {
+	    DOMElement *styleElement =
+	      [document createElementNS:@"http://www.w3.org/2000/svg"
+			  qualifiedName:@"style"];
+	    styleElement.textContent = styleSheet;
+	    [documentElement appendChild:styleElement];
+	  }
 
-      widthBaseVal = [documentElement valueForKeyPath:@"width.baseVal"];
-      heightBaseVal = [documentElement valueForKeyPath:@"height.baseVal"];
-      if ((((NSNumber *) [widthBaseVal valueForKey:@"unitType"]).intValue
-	   == SVG_LENGTHTYPE_PERCENTAGE)
-	  || (((NSNumber *) [heightBaseVal valueForKey:@"unitType"]).intValue
-	      == SVG_LENGTHTYPE_PERCENTAGE))
-	boundingBox = [documentElement callWebScriptMethod:@"getBBox"
-					     withArguments:@[]];
-      else
-	boundingBox = nil;
-
+	widthBaseVal = [documentElement valueForKeyPath:@"width.baseVal"];
+	heightBaseVal = [documentElement valueForKeyPath:@"height.baseVal"];
+	if ((((NSNumber *) [widthBaseVal valueForKey:@"unitType"]).intValue
+	     == SVG_LENGTHTYPE_PERCENTAGE)
+	    || (((NSNumber *) [heightBaseVal valueForKey:@"unitType"]).intValue
+		== SVG_LENGTHTYPE_PERCENTAGE))
+	  boundingBox = [documentElement callWebScriptMethod:@"getBBox"
+					       withArguments:@[]];
+	else
+	  boundingBox = nil;
+      }
+    @catch (NSException *exception)
+      {
+      }
+    MRC_RETAIN (widthBaseVal);
+    MRC_RETAIN (heightBaseVal);
+    MRC_RETAIN (boundingBox);
+    finished = YES;
+  };
+  [webView.mainFrame loadData:data MIMEType:@"image/svg+xml"
+	     textEncodingName:nil baseURL:baseURL];
 #endif  /* !USE_WK_API */
-      if (widthBaseVal)
-	frameRect.size = [self frameSizeForBoundingBox:boundingBox
-					  widthBaseVal:widthBaseVal
-					 heightBaseVal:heightBaseVal
-					    imageWidth:&width
-					   imageHeight:&height];
+
+  /* webView.isLoading is not sufficient if we have <image
+     xlink:href=... /> */
+  while (!finished)
+    mac_run_loop_run_once (0);
+
+  int width = -1, height;
 #ifdef USE_WK_API
-      finished = NO;
-      script = [NSString stringWithFormat:@""
+  if (jsonString == nil)
+    widthBaseVal = nil;
+  else
+    {
+      NSData *data =
+	[jsonString dataUsingEncoding:NSUTF8StringEncoding];
+      NSDictionary *jsonObject =
+	[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+
+      boundingBox = jsonObject[@"boundingBox"];
+      widthBaseVal = jsonObject[@"widthBaseVal"];
+      heightBaseVal = jsonObject[@"heightBaseVal"];
+      MRC_AUTORELEASE (jsonString);
+    }
+#else
+  MRC_AUTORELEASE (widthBaseVal);
+  MRC_AUTORELEASE (heightBaseVal);
+  MRC_AUTORELEASE (boundingBox);
+#endif
+  if (widthBaseVal == nil)
+    {
+      MRC_RELEASE (self);
+      self = nil;
+
+      return self;
+    }
+
+  frameRect.size = [self frameSizeForBoundingBox:boundingBox
+				    widthBaseVal:widthBaseVal
+				   heightBaseVal:heightBaseVal
+				      imageWidth:&width
+				     imageHeight:&height];
+#ifdef USE_WK_API
+  NSString *script = [NSString stringWithFormat:@""
 "const svgElement = document.createElementNS ('http://www.w3.org/2000/svg', 'svg');\n"
 "const gElement = document.createElementNS ('http://www.w3.org/2000/svg', 'g');\n"
 "svgElement.setAttribute ('width', '%d');\n"
@@ -13820,27 +13853,10 @@ static WebView *EmacsSVGDocumentLastWebView;
 "gElement.appendChild (documentElement);\n"
 "documentElement = svgElement;\n"
 "null;", width, height, width, height, width, height];
-
-      [webView evaluateJavaScript:script
-		completionHandler:^(id scriptResult, NSError *error) {
-	  finished = YES;
-	}];
-
-      while (!finished)
-	mac_run_loop_run_once (0);
+  [webView evaluateJavaScript:script
+	    completionHandler:^(id scriptResult, NSError *error) {
+    }];
 #endif
-    }
-  @catch (NSException *exception)
-    {
-    }
-
-  if (width < 0)
-    {
-      MRC_RELEASE (self);
-      self = nil;
-
-      return self;
-    }
 
   webView.frame = frameRect;
   frameRect.size.width = width;
@@ -13952,6 +13968,7 @@ static WebView *EmacsSVGDocumentLastWebView;
       ctm = CGAffineTransformConcat (flip, ctm);
 
       BOOL __block finished = NO;
+      NSImage * __block image = nil;
       int destWidth = NSWidth (destRect), destHeight = NSHeight (destRect);
       NSString *script = [NSString stringWithFormat:@""
 "documentElement.style.color = '%@';\n"
@@ -13968,26 +13985,22 @@ static WebView *EmacsSVGDocumentLastWebView;
 
       [webView evaluateJavaScript:script
 		completionHandler:^(id scriptResult, NSError *error) {
-	  finished = YES;
+	  if (!error)
+	    {
+	      WKSnapshotConfiguration *snapshotConfiguration =
+		[[WKSnapshotConfiguration alloc] init];
+
+	      webView.frame = destRect;
+	      [webView _setOverrideDeviceScaleFactor:1];
+	      [webView takeSnapshotWithConfiguration:snapshotConfiguration
+				   completionHandler:^(NSImage *snapshotImage,
+						       NSError *error) {
+		  image = MRC_RETAIN (snapshotImage);
+		  finished = YES;
+		}];
+	      MRC_RELEASE (snapshotConfiguration);
+	    }
 	}];
-
-      while (!finished)
-	mac_run_loop_run_once (0);
-
-      WKSnapshotConfiguration *snapshotConfiguration =
-	[[WKSnapshotConfiguration alloc] init];
-      NSImage * __block image;
-
-      webView.frame = destRect;
-      [webView _setOverrideDeviceScaleFactor:1];
-      finished = NO;
-      [webView takeSnapshotWithConfiguration:snapshotConfiguration
-			   completionHandler:^(NSImage *snapshotImage,
-					       NSError *error) {
-	  image = MRC_RETAIN (snapshotImage);
-	  finished = YES;
-	}];
-      MRC_RELEASE (snapshotConfiguration);
 
       while (!finished)
 	mac_run_loop_run_once (0);
@@ -14037,12 +14050,16 @@ static WebView *EmacsSVGDocumentLastWebView;
 }
 
 #ifdef USE_WK_API
-- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation
+- (void)webView:(WKWebView *)view didFinishNavigation:(WKNavigation *)navigation
 {
-  isLoaded = YES;
+  if (finishNavigationHandler)
+    {
+      finishNavigationHandler (view, navigation);
+      self.finishNavigationHandler = nil;
+    }
 }
 
-- (void)webView:(WKWebView *)webView startURLSchemeTask:(id <WKURLSchemeTask>)urlSchemeTask
+- (void)webView:(WKWebView *)view startURLSchemeTask:(id <WKURLSchemeTask>)urlSchemeTask
 {
   NSURL *url = urlSchemeTask.request.URL;
   NSURLComponents *components =
@@ -14110,13 +14127,17 @@ static WebView *EmacsSVGDocumentLastWebView;
   [urlSchemeTask didFinish];
 }
 
-- (void)webView:(WKWebView *)webView stopURLSchemeTask:(id <WKURLSchemeTask>)urlSchemeTask
+- (void)webView:(WKWebView *)view stopURLSchemeTask:(id <WKURLSchemeTask>)urlSchemeTask
 {
 }
 #else
 - (void)webView:(WebView *)sender didFinishLoadForFrame:(WebFrame *)frame
 {
-  isLoaded = YES;
+  if (finishLoadForFrameHandler)
+    {
+      finishLoadForFrameHandler (sender, frame);
+      self.finishLoadForFrameHandler = nil;
+    }
 }
 #endif
 
@@ -15215,7 +15236,8 @@ mac_update_accessibility_status (struct frame *f)
 
 - (CALayer *)layerForRect:(NSRect)rect
 {
-  NSRect rectInLayer = [emacsView convertRect:rect toView:overlayView];
+  NSRect rectInLayer = [emacsView convertRect:rect
+				       toView:emacsWindow.contentView];
   CALayer *layer, *contentLayer;
   NSBitmapImageRep *bitmap;
 
